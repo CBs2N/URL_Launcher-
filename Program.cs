@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
+using Microsoft.Win32;
 
 namespace UrlLauncherApp
 {
@@ -30,6 +31,23 @@ namespace UrlLauncherApp
     {
         public int version;
         public List<LinkRecord> links;
+    }
+
+    public class AppSettings
+    {
+        public string browserName;
+        public string browserPath;
+        public double openIntervalSeconds;
+    }
+
+    public class BrowserInfo
+    {
+        public string Name;
+        public string Path;
+        public override string ToString()
+        {
+            return Name + " (" + Path + ")";
+        }
     }
 
     public class ShadowButton : Button
@@ -79,21 +97,29 @@ namespace UrlLauncherApp
         private readonly ContextMenuStrip _listMenu = new ContextMenuStrip();
         private string _currentFile;
         private readonly string _defaultFile;
+        private readonly string _settingsFile;
         private bool _hasUnsavedChanges;
+        private AppSettings _appSettings;
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
         public MainForm()
         {
             Text = "网址批量打开工具";
-            Width = 1020;
+            Width = 1200;
             Height = 620;
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(900, 540);
+            MinimumSize = new Size(1080, 540);
             Font = new Font("Segoe UI", 9.5F, FontStyle.Regular);
             DoubleBuffered = true;
 
+            // 加载应用图标（窗口标题栏+任务栏）
+            var iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+            if (File.Exists(iconPath)) Icon = new Icon(iconPath);
+
             _defaultFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "saved_urls.json");
+            _settingsFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app_settings.json");
             _currentFile = _defaultFile;
+            _appSettings = LoadAppSettings();
 
             BuildUi();
             LoadStartupUrls();
@@ -263,6 +289,10 @@ namespace UrlLauncherApp
             var openPartialButton = new ShadowButton { Text = "选择部分打开", Width = 132, Height = 32 };
             openPartialButton.Click += async (s, e) => await OpenPartialUrlsAsync();
             actionPanel.Controls.Add(openPartialButton);
+
+            var settingsButton = new ShadowButton { Text = "设置", Width = 80, Height = 32 };
+            settingsButton.Click += (s, e) => OpenSettings();
+            actionPanel.Controls.Add(settingsButton);
 
             _fileLabel.Dock = DockStyle.Fill;
             _fileLabel.TextAlign = ContentAlignment.MiddleLeft;
@@ -455,6 +485,9 @@ namespace UrlLauncherApp
             using (var form = new Form())
             {
                 form.Text = "备注标题";
+                // 加载应用图标
+                var titleIconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+                if (File.Exists(titleIconPath)) form.Icon = new Icon(titleIconPath);
                 form.StartPosition = FormStartPosition.CenterParent;
                 form.Width = 460;
                 form.Height = 180;
@@ -698,25 +731,8 @@ namespace UrlLauncherApp
                 return;
             }
 
-            await Task.Run(() =>
-            {
-                foreach (var url in urls)
-                {
-                    try
-                    {
-                        Process.Start(new ProcessStartInfo
-                        {
-                            FileName = url,
-                            UseShellExecute = true
-                        });
-                    }
-                    catch
-                    {
-                        // 某个网址失败不影响后续网址继续打开
-                    }
-                    Thread.Sleep(100);
-                }
-            });
+            var failed = await Task.Run(() => OpenUrlsWithSettings(urls));
+            HandleOpenFailure(failed);
         }
 
         private async Task OpenPartialUrlsAsync()
@@ -737,24 +753,108 @@ namespace UrlLauncherApp
                     return;
                 }
 
-                await Task.Run(() =>
+                var selectedUrls = urls.Select(x => x.Item2).Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+                var failed = await Task.Run(() => OpenUrlsWithSettings(selectedUrls));
+                HandleOpenFailure(failed);
+            }
+        }
+
+        private BrowserOpenFailure OpenUrlsWithSettings(List<string> urls)
+        {
+            if (urls == null || urls.Count == 0) return null;
+            var delayMs = (int)Math.Round(Math.Max(0.1, Math.Min(10.0, _appSettings.openIntervalSeconds)) * 1000.0);
+            for (var i = 0; i < urls.Count; i++)
+            {
+                var url = urls[i];
+                try
                 {
-                    foreach (var item in urls)
+                    if (!string.IsNullOrWhiteSpace(_appSettings.browserPath))
                     {
-                        try
+                        Process.Start(new ProcessStartInfo
                         {
-                            Process.Start(new ProcessStartInfo
-                            {
-                                FileName = item.Item2,
-                                UseShellExecute = true
-                            });
-                        }
-                        catch
-                        {
-                        }
-                        Thread.Sleep(100);
+                            FileName = _appSettings.browserPath,
+                            Arguments = url,
+                            UseShellExecute = false
+                        });
                     }
-                });
+                    else
+                    {
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = url,
+                            UseShellExecute = true
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    return new BrowserOpenFailure
+                    {
+                        Url = url,
+                        ErrorMessage = ex.Message
+                    };
+                }
+                Thread.Sleep(delayMs);
+            }
+            return null;
+        }
+
+        private void HandleOpenFailure(BrowserOpenFailure failed)
+        {
+            if (failed == null) return;
+            var browserTip = string.IsNullOrWhiteSpace(_appSettings.browserName) ? "系统默认浏览器" : _appSettings.browserName;
+            var result = MessageBox.Show(
+                "打开链接失败，已停止后续打开。\n浏览器：" + browserTip + "\n链接：" + failed.Url + "\n原因：" + failed.ErrorMessage +
+                "\n\n是否现在更换浏览器？\n选择“是”进入设置，选择“否”取消。",
+                "打开失败",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning
+            );
+            if (result == DialogResult.Yes)
+            {
+                OpenSettings();
+            }
+        }
+
+        private AppSettings LoadAppSettings()
+        {
+            try
+            {
+                if (File.Exists(_settingsFile))
+                {
+                    var text = File.ReadAllText(_settingsFile, Encoding.UTF8);
+                    var s = Json.Deserialize<AppSettings>(text);
+                    if (s != null)
+                    {
+                        if (s.openIntervalSeconds < 0.1 || s.openIntervalSeconds > 10.0) s.openIntervalSeconds = 0.1;
+                        return s;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return new AppSettings
+            {
+                browserName = string.Empty,
+                browserPath = string.Empty,
+                openIntervalSeconds = 0.1
+            };
+        }
+
+        private void SaveAppSettings()
+        {
+            var json = Json.Serialize(_appSettings);
+            File.WriteAllText(_settingsFile, json, Encoding.UTF8);
+        }
+
+        private void OpenSettings()
+        {
+            using (var form = new SettingsForm(_appSettings))
+            {
+                if (form.ShowDialog() != DialogResult.OK) return;
+                _appSettings = form.ResultSettings;
+                SaveAppSettings();
             }
         }
 
@@ -792,6 +892,12 @@ namespace UrlLauncherApp
         }
     }
 
+    public class BrowserOpenFailure
+    {
+        public string Url;
+        public string ErrorMessage;
+    }
+
     public class PartialOpenForm : Form
     {
         private sealed class Candidate
@@ -817,6 +923,10 @@ namespace UrlLauncherApp
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(800, 450);
             Font = new Font("Segoe UI", 9.5F, FontStyle.Regular);
+
+            // 加载应用图标
+            var partialIconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+            if (File.Exists(partialIconPath)) Icon = new Icon(partialIconPath);
 
             foreach (var item in items)
             {
@@ -924,6 +1034,300 @@ namespace UrlLauncherApp
                 row.SubItems.Add(candidate.Url);
                 _list.Items.Add(row);
             }
+        }
+    }
+
+    public class SettingsForm : Form
+    {
+        private readonly AppSettings _editing;
+        private readonly Label _browserLabel = new Label();
+        private readonly TextBox _intervalInput = new TextBox();
+        public AppSettings ResultSettings { get { return _editing; } }
+
+        public SettingsForm(AppSettings current)
+        {
+            _editing = new AppSettings
+            {
+                browserName = current == null ? string.Empty : (current.browserName ?? string.Empty),
+                browserPath = current == null ? string.Empty : (current.browserPath ?? string.Empty),
+                openIntervalSeconds = current == null ? 0.1 : current.openIntervalSeconds
+            };
+            if (_editing.openIntervalSeconds < 0.1 || _editing.openIntervalSeconds > 10.0) _editing.openIntervalSeconds = 0.1;
+
+            Text = "设置";
+            Width = 680;
+            Height = 360;
+            StartPosition = FormStartPosition.CenterParent;
+            MinimumSize = new Size(620, 320);
+            Font = new Font("Segoe UI", 9.5F, FontStyle.Regular);
+
+            // 加载应用图标
+            var settingsIconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+            if (File.Exists(settingsIconPath)) Icon = new Icon(settingsIconPath);
+
+            BuildUi();
+            RefreshBrowserLabel();
+        }
+
+        private void BuildUi()
+        {
+            var root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 5,
+                Padding = new Padding(14)
+            };
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 86));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            Controls.Add(root);
+
+            var browserPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1 };
+            browserPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            browserPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            root.Controls.Add(browserPanel, 0, 0);
+
+            var detectBtn = new ShadowButton { Text = "检测并选择浏览器", Width = 160, Height = 32 };
+            detectBtn.Click += (s, e) => DetectAndChooseBrowser();
+            browserPanel.Controls.Add(detectBtn, 0, 0);
+
+            _browserLabel.Dock = DockStyle.Fill;
+            _browserLabel.TextAlign = ContentAlignment.MiddleLeft;
+            _browserLabel.ForeColor = Color.FromArgb(42, 74, 110);
+            browserPanel.Controls.Add(_browserLabel, 0, 1);
+
+            var intervalPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 };
+            intervalPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+            intervalPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+            intervalPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            root.Controls.Add(intervalPanel, 0, 1);
+
+            var intervalLabel = new Label
+            {
+                Text = "链接打开间隔（秒）：",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoSize = false
+            };
+            intervalPanel.Controls.Add(intervalLabel, 0, 0);
+
+            _intervalInput.Dock = DockStyle.None;
+            _intervalInput.Width = 120;
+            _intervalInput.Height = 28;
+            _intervalInput.Anchor = AnchorStyles.Left;
+            _intervalInput.Text = _editing.openIntervalSeconds.ToString("0.0");
+            _intervalInput.Margin = new Padding(3, 2, 3, 2);
+            intervalPanel.Controls.Add(_intervalInput, 1, 0);
+
+            var intervalHint = new Label
+            {
+                Text = "范围 0.1 ~ 10（例如 0.5 或 2）",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(84, 104, 130)
+            };
+            intervalPanel.Controls.Add(intervalHint, 2, 0);
+
+            var infoLabel = new Label
+            {
+                Text = "当前版本：" + GetAppVersion() + "    创作者：CBs2N",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(47, 77, 112)
+            };
+            root.Controls.Add(infoLabel, 0, 3);
+
+            var btnPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
+            root.Controls.Add(btnPanel, 0, 4);
+
+            var okBtn = new ShadowButton { Text = "保存设置", Width = 100, Height = 32, DialogResult = DialogResult.None };
+            okBtn.Click += (s, e) => SaveAndClose();
+            var cancelBtn = new ShadowButton { Text = "取消", Width = 80, Height = 32, DialogResult = DialogResult.Cancel };
+            btnPanel.Controls.Add(okBtn);
+            btnPanel.Controls.Add(cancelBtn);
+            CancelButton = cancelBtn;
+        }
+
+        private void DetectAndChooseBrowser()
+        {
+            var consent = MessageBox.Show(
+                "将检测本机已安装且可用的浏览器，是否继续？",
+                "浏览器检测",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question
+            );
+            if (consent != DialogResult.Yes) return;
+
+            var list = DetectBrowsers();
+            if (list.Count == 0)
+            {
+                MessageBox.Show("未检测到可用浏览器，将继续使用系统默认浏览器。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var selected = ChooseBrowserDialog(list);
+            if (selected == null) return;
+            _editing.browserName = selected.Name;
+            _editing.browserPath = selected.Path;
+            RefreshBrowserLabel();
+        }
+
+        private void RefreshBrowserLabel()
+        {
+            if (string.IsNullOrWhiteSpace(_editing.browserName))
+            {
+                _browserLabel.Text = "当前浏览器：系统默认浏览器";
+            }
+            else
+            {
+                _browserLabel.Text = "当前浏览器：" + _editing.browserName + "（" + _editing.browserPath + "）";
+            }
+        }
+
+        private void SaveAndClose()
+        {
+            double sec;
+            if (!double.TryParse((_intervalInput.Text ?? string.Empty).Trim(), out sec))
+            {
+                MessageBox.Show("间隔输入无效，请输入数字（0.1 到 10）。", "输入错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _intervalInput.Focus();
+                _intervalInput.SelectAll();
+                return;
+            }
+            if (sec < 0.1 || sec > 10.0)
+            {
+                MessageBox.Show("间隔超出范围，请输入 0.1 到 10 之间的数字。", "输入错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _intervalInput.Focus();
+                _intervalInput.SelectAll();
+                return;
+            }
+            _editing.openIntervalSeconds = Math.Round(sec, 2);
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        private static List<BrowserInfo> DetectBrowsers()
+        {
+            var candidates = new List<BrowserInfo>();
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            AddRegistryBrowsers(candidates, visited, Registry.LocalMachine, @"SOFTWARE\Clients\StartMenuInternet");
+            AddRegistryBrowsers(candidates, visited, Registry.CurrentUser, @"SOFTWARE\Clients\StartMenuInternet");
+            AddKnownPath(candidates, visited, "Microsoft Edge", @"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe");
+            AddKnownPath(candidates, visited, "Microsoft Edge", @"C:\Program Files\Microsoft\Edge\Application\msedge.exe");
+            AddKnownPath(candidates, visited, "Google Chrome", @"C:\Program Files\Google\Chrome\Application\chrome.exe");
+            AddKnownPath(candidates, visited, "Google Chrome", @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe");
+            AddKnownPath(candidates, visited, "Mozilla Firefox", @"C:\Program Files\Mozilla Firefox\firefox.exe");
+            AddKnownPath(candidates, visited, "Mozilla Firefox", @"C:\Program Files (x86)\Mozilla Firefox\firefox.exe");
+            AddKnownPath(candidates, visited, "Opera", @"C:\Users\" + Environment.UserName + @"\AppData\Local\Programs\Opera\launcher.exe");
+            AddKnownPath(candidates, visited, "Brave", @"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe");
+
+            return candidates.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private static void AddRegistryBrowsers(List<BrowserInfo> list, HashSet<string> visited, RegistryKey root, string path)
+        {
+            try
+            {
+                using (var key = root.OpenSubKey(path))
+                {
+                    if (key == null) return;
+                    foreach (var subName in key.GetSubKeyNames())
+                    {
+                        using (var sub = key.OpenSubKey(subName))
+                        {
+                            if (sub == null) continue;
+                            var displayNameObj = sub.GetValue(null);
+                            var displayName = displayNameObj == null ? subName : displayNameObj.ToString();
+                            using (var cmdKey = sub.OpenSubKey(@"shell\open\command"))
+                            {
+                                if (cmdKey == null) continue;
+                                var cmdObj = cmdKey.GetValue(null);
+                                if (cmdObj == null) continue;
+                                var exePath = ExtractExePath(cmdObj.ToString());
+                                if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath)) continue;
+                                if (visited.Add(exePath))
+                                {
+                                    list.Add(new BrowserInfo { Name = displayName, Path = exePath });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static void AddKnownPath(List<BrowserInfo> list, HashSet<string> visited, string name, string path)
+        {
+            if (File.Exists(path) && visited.Add(path))
+            {
+                list.Add(new BrowserInfo { Name = name, Path = path });
+            }
+        }
+
+        private static string ExtractExePath(string command)
+        {
+            if (string.IsNullOrWhiteSpace(command)) return string.Empty;
+            var text = command.Trim();
+            if (text.StartsWith("\""))
+            {
+                var next = text.IndexOf("\"", 1, StringComparison.Ordinal);
+                if (next > 1) return text.Substring(1, next - 1);
+            }
+            var exeIndex = text.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+            if (exeIndex > 0) return text.Substring(0, exeIndex + 4);
+            var firstSpace = text.IndexOf(' ');
+            return firstSpace > 0 ? text.Substring(0, firstSpace) : text;
+        }
+
+        private BrowserInfo ChooseBrowserDialog(List<BrowserInfo> browsers)
+        {
+            using (var form = new Form())
+            {
+                form.Text = "选择浏览器";
+                form.StartPosition = FormStartPosition.CenterParent;
+                form.Width = 760;
+                form.Height = 420;
+                form.MinimumSize = new Size(640, 360);
+
+                // 加载应用图标
+                var chooseIconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+                if (File.Exists(chooseIconPath)) form.Icon = new Icon(chooseIconPath);
+
+                var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Padding = new Padding(12) };
+                root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+                root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+                form.Controls.Add(root);
+
+                var listBox = new ListBox { Dock = DockStyle.Fill };
+                foreach (var b in browsers) listBox.Items.Add(b);
+                if (listBox.Items.Count > 0) listBox.SelectedIndex = 0;
+                root.Controls.Add(listBox, 0, 0);
+
+                var btnPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
+                var okBtn = new ShadowButton { Text = "确定", Width = 80, Height = 32, DialogResult = DialogResult.OK };
+                var cancelBtn = new ShadowButton { Text = "取消", Width = 80, Height = 32, DialogResult = DialogResult.Cancel };
+                btnPanel.Controls.Add(okBtn);
+                btnPanel.Controls.Add(cancelBtn);
+                root.Controls.Add(btnPanel, 0, 1);
+                form.AcceptButton = okBtn;
+                form.CancelButton = cancelBtn;
+
+                if (form.ShowDialog() != DialogResult.OK) return null;
+                if (listBox.SelectedItem == null) return null;
+                return (BrowserInfo)listBox.SelectedItem;
+            }
+        }
+
+        private static string GetAppVersion()
+        {
+            return "1.4.1";
         }
     }
 }

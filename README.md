@@ -54,12 +54,28 @@
 
 - `URLLauncher.exe`
 
-## 构建命令（可选）
+## 开发与重新编译
 
-如需重新编译，可在项目目录执行：
+项目中已提供构建脚本，推荐在 `url_launcher_app` 目录下运行：
 
 ```powershell
-& "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe" /target:winexe /platform:anycpu /optimize+ /r:System.Web.Extensions.dll /out:URLLauncher.exe Program.cs
+.\build.ps1
+```
+
+该脚本会使用本机 .NET Framework 的 `csc.exe` 编译 `Program.cs`，并将 `app.ico` 嵌入到生成的 `URLLauncher.exe` 中。
+
+如果你希望保存源码后自动重新编译，可启动监视脚本：
+
+```powershell
+.\watch.ps1
+```
+
+`watch.ps1` 会监视当前目录下的 `*.cs` 和 `app.ico` 文件变化，并在变更后自动触发构建。
+
+如果你需要直接调用编译命令，也可以使用：
+
+```powershell
+& "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe" /target:winexe /platform:anycpu /optimize+ /win32icon:app.ico /r:System.Web.Extensions.dll /out:URLLauncher.exe Program.cs
 ```
 
 ## 更新日志
